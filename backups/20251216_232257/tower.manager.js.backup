@@ -1,0 +1,79 @@
+const constants = require('constants');
+const utils = require('utils');
+
+module.exports = {
+    run: function () {
+        // Get all towers from all rooms
+        for (const roomName in Game.rooms) {
+            const room = Game.rooms[roomName];
+            // Use cached towers
+            const towers = utils.getCachedStructures(room, STRUCTURE_TOWER, 'towers', 10)
+                .filter(s => s.store[RESOURCE_ENERGY] > 0);
+
+            // Check for hostiles in the room once per room
+            const hostilesInRoom = room.find(FIND_HOSTILE_CREEPS);
+            const hasHostiles = hostilesInRoom.length > 0;
+
+            for (let tower of towers) {
+                // Attack hostiles first - ALWAYS prioritize defense (every tick)
+                const hostile = tower.pos.findClosestByRange(FIND_HOSTILE_CREEPS);
+                if (hostile) {
+                    tower.attack(hostile);
+                    continue;
+                }
+
+                // Heal critically damaged creeps (<50% health) - every tick
+                const criticalCreep = tower.pos.findClosestByRange(FIND_MY_CREEPS, {
+                    filter: c => c.hits < c.hitsMax * 0.5
+                });
+                if (criticalCreep) {
+                    tower.heal(criticalCreep);
+                    continue;
+                }
+
+                // Repair every 15 ticks normally, or every tick if hostiles are present
+                if (!hasHostiles && Game.time % 1 !== 0) {
+                    continue;
+                }
+
+                // Repair weakest ramparts/walls in ENTIRE room (up to threshold)
+                const ramparts = room.find(FIND_STRUCTURES, {
+                    filter: s => (s.structureType === STRUCTURE_WALL || s.structureType === STRUCTURE_RAMPART) &&
+                        s.hits < constants.TOWER_REPAIR_THRESHOLD
+                });
+
+                if (ramparts.length > 0) {
+                    // Find the weakest rampart/wall to ensure all get repaired evenly
+                    ramparts.sort((a, b) => a.hits - b.hits);
+                    tower.repair(ramparts[0]);
+                    continue;
+                }
+
+                // Heal slightly damaged creeps
+                const damagedCreep = tower.pos.findClosestByRange(FIND_MY_CREEPS, {
+                    filter: c => c.hits < c.hitsMax
+                });
+                if (damagedCreep) {
+                    tower.heal(damagedCreep);
+                    continue;
+                }
+
+                // Last priority: repair roads and other structures
+                const criticalStructure = tower.pos.findClosestByRange(FIND_STRUCTURES, {
+                    filter: s => {
+                        if (s.structureType === STRUCTURE_ROAD) {
+                            return s.hits < 1500;  // Repair roads below 1500 HP
+                        }
+                        return s.hits < s.hitsMax * 0.8 &&
+                            s.structureType !== STRUCTURE_WALL &&
+                            s.structureType !== STRUCTURE_RAMPART;
+                    }
+                });
+
+                if (criticalStructure) {
+                    tower.repair(criticalStructure);
+                }
+            }
+        }
+    }
+};

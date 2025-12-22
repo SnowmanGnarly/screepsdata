@@ -1,0 +1,311 @@
+// utils.js - helper functions for Screeps project
+
+/**
+ * Build a harvester body with at least 1 WORK, 1 CARRY, 1 MOVE.
+ * Capped at 5 WORK, 2 CARRY, 2 MOVE maximum.
+ * @param {number} energy - Available energy for the spawn.
+ * @returns {BodyPartConstant[]} Array of body parts.
+ */
+function makeHarvesterBody(energy) {
+    // Minimum body cost is 200 (WORK + CARRY + MOVE)
+    if (energy < 200) {
+        return [WORK, CARRY, MOVE];
+    }
+
+    // Maximum harvester: 5 WORK, 2 CARRY, 2 MOVE = 700 energy
+    const maxEnergy = 700;
+    const cappedEnergy = Math.min(energy, maxEnergy);
+
+    // Body pattern: [WORK, WORK, ..., CARRY, CARRY, MOVE, MOVE]
+    const body = [];
+    let cost = 0;
+
+    // Add as many WORK parts as possible (max 5), leaving room for 2 CARRY + 2 MOVE
+    const workCost = 100;
+    const minSupportCost = 200; // 2 CARRY (100) + 2 MOVE (100)
+    const maxWork = 5;
+
+    while (cost + workCost + minSupportCost <= cappedEnergy && body.filter(p => p === WORK).length < maxWork) {
+        body.push(WORK);
+        cost += workCost;
+    }
+
+    // Ensure at least 1 WORK part
+    if (body.length === 0) {
+        body.push(WORK);
+        cost += 100;
+    }
+
+    // Add 2 CARRY parts (or 1 if not enough energy)
+    // 2 CARRY = 2 × 50 = 100 energy
+    if (cost + 100 <= cappedEnergy) {
+        body.push(CARRY);
+        body.push(CARRY);
+        cost += 100; // 2 × 50
+    } else if (cost + 50 <= cappedEnergy) {
+        // Add 1 CARRY if we can afford it
+        body.push(CARRY);
+        cost += 50;
+    } else {
+        // Always add at least 1 CARRY even if it exceeds budget slightly
+        body.push(CARRY);
+        cost += 50;
+    }
+
+    // Add 2 MOVE parts (or 1 if not enough energy for 2)
+    // 2 MOVE = 2 × 50 = 100 energy
+    if (cost + 100 <= cappedEnergy) {
+        body.push(MOVE);
+        body.push(MOVE);
+        cost += 100; // 2 × 50
+    } else if (cost + 50 <= cappedEnergy) {
+        // Add 1 MOVE if we can afford it
+        body.push(MOVE);
+        cost += 50;
+    } else {
+        // Always add at least 1 MOVE even if it exceeds budget slightly
+        body.push(MOVE);
+        cost += 50;
+    }
+
+    return body;
+}
+
+/**
+ * Build a generic worker body (builder/upgrader) with balanced parts.
+ * Uses the standard segment of WORK, CARRY, MOVE.
+ * @param {number} energy - Available energy for the spawn.
+ * @returns {BodyPartConstant[]} Array of body parts.
+ */
+function makeWorkerBody(energy) {
+    const segmentCost = 200; // WORK + CARRY + MOVE
+    const maxSegments = Math.floor(energy / segmentCost);
+    if (maxSegments <= 0) {
+        return [WORK, CARRY, MOVE];
+    }
+    const numSegments = Math.min(maxSegments, 16); // cap at 48 parts
+    const body = [];
+    for (let i = 0; i < numSegments; i++) body.push(WORK);
+    for (let i = 0; i < numSegments; i++) body.push(CARRY);
+    for (let i = 0; i < numSegments; i++) body.push(MOVE);
+    return body;
+}
+
+/**
+ * Find the best energy source for a creep (harvesters, storage, containers).
+ * Priority: Harvesters with energy > Storage > Containers
+ * @param {Creep} creep - The creep that needs energy.
+ * @returns {Creep|StructureStorage|StructureContainer|null}
+ */
+function getEnergySource(creep) {
+    const room = creep.room;
+
+    // 1. Check for harvesters with energy (they can transfer to workers)
+    const harvesters = room.find(FIND_MY_CREEPS, {
+        filter: function (c) {
+            return c.memory.role === 'harvester' &&
+                c.store[RESOURCE_ENERGY] > creep.store.getFreeCapacity(RESOURCE_ENERGY) * 0.5 &&
+                c.id !== creep.id;
+        }
+    });
+
+    if (harvesters.length > 0) {
+        // Find closest harvester
+        const closestHarvester = creep.pos.findClosestByPath(harvesters);
+        if (closestHarvester) {
+            return closestHarvester;
+        }
+    }
+
+    // 2. Check storage
+    if (room.storage && room.storage.store[RESOURCE_ENERGY] > 0) {
+        return room.storage;
+    }
+
+    // 3. Check containers
+    const containers = room.find(FIND_STRUCTURES, {
+        filter: function (s) {
+            return s.structureType === STRUCTURE_CONTAINER && s.store[RESOURCE_ENERGY] > 0;
+        }
+    });
+
+    if (containers.length > 0) {
+        // Find closest container
+        const closestContainer = creep.pos.findClosestByPath(containers);
+        if (closestContainer) {
+            return closestContainer;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Cached lookup for structures of a given type.
+ * Stores the result in room.memory._cache[cacheKey] with a timestamp.
+ * @param {Room} room - The room to query.
+ * @param {StructureConstant} type - Structure type to find.
+ * @param {string} cacheKey - Unique key for this cache entry.
+ * @param {number} ttl - Time‑to‑live in ticks (default 10).
+ * @returns {Structure[]} Array of structures.
+ */
+function getCachedStructures(room, type, cacheKey, ttl = 10) {
+    if (!room.memory._cache) room.memory._cache = {};
+    const now = Game.time;
+    const entry = room.memory._cache[cacheKey];
+    if (entry && now - entry.time < ttl) {
+        return entry.ids.map(id => Game.getObjectById(id)).filter(s => s != null);
+    }
+    const structs = room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === type });
+    room.memory._cache[cacheKey] = { ids: structs.map(s => s.id), time: now };
+    return structs;
+}
+
+module.exports = {
+    makeHarvesterBody,
+    makeWorkerBody,
+    getEnergySource,
+    getCachedStructures,
+
+    /**
+     * Build a hauler body (CARRY/MOVE heavy).
+     * @param {number} energy
+     * @returns {BodyPartConstant[]}
+     */
+    makeHaulerBody: function (energy) {
+        // Haulers need CARRY and MOVE. 1 CARRY = 50, 1 MOVE = 50. Total 100 per part pair.
+        // Cap at 1600 energy (16 CARRY + 16 MOVE) = 800 capacity
+        const maxCost = 1600;
+        const actualEnergy = Math.min(energy, maxCost);
+        const numParts = Math.floor(actualEnergy / 100);
+
+        const body = [];
+        for (let i = 0; i < numParts; i++) {
+            body.push(CARRY);
+            body.push(MOVE);
+        }
+        return body;
+    },
+
+    /**
+     * Build a warrior body (melee fighter).
+     * Pattern: TOUGH (front) -> ATTACK -> MOVE (back)
+     * Minimum: 2 ATTACK, rest is TOUGH and MOVE
+     * @param {number} energy
+     * @returns {BodyPartConstant[]}
+     */
+    makeWarriorBody: function (energy) {
+        // Minimum: 2 ATTACK + 2 MOVE = 160 energy
+        if (energy < 160) {
+            return [ATTACK, ATTACK, MOVE, MOVE];
+        }
+
+        const maxCost = 3000; // 50 parts max
+        const actualEnergy = Math.min(energy, maxCost);
+
+        // Reserve energy for minimum 2 ATTACK and matching MOVE
+        const minAttackCost = 160; // 2 ATTACK (160) + 2 MOVE (100) = 260, but we'll add MOVE later
+        let remainingEnergy = actualEnergy - minAttackCost;
+
+        const body = [];
+
+        // Add TOUGH parts first (they go in front for damage absorption)
+        // TOUGH = 10 energy each
+        while (remainingEnergy >= 60 && body.length < 40) { // 60 = TOUGH + MOVE
+            body.push(TOUGH);
+            remainingEnergy -= 10;
+        }
+
+        // Add minimum 2 ATTACK parts
+        body.push(ATTACK, ATTACK);
+
+        // Add more ATTACK parts if we have energy
+        while (remainingEnergy >= 130 && body.filter(function (p) { return p === ATTACK; }).length < 20) {
+            body.push(ATTACK);
+            remainingEnergy -= 80;
+        }
+
+        // Add MOVE parts (equal to total body parts for full speed)
+        const totalParts = body.length;
+        for (let i = 0; i < totalParts && body.length < 50; i++) {
+            body.push(MOVE);
+        }
+
+        return body;
+    },
+
+    /**
+     * Build a ranged attacker body.
+     * Pattern: TOUGH (front) -> RANGED_ATTACK -> MOVE (back)
+     * Minimum: 2 RANGED_ATTACK
+     * @param {number} energy
+     * @returns {BodyPartConstant[]}
+     */
+    makeRangedBody: function (energy) {
+        // Minimum: 2 RANGED_ATTACK + 2 MOVE = 300 energy
+        if (energy < 300) {
+            return [RANGED_ATTACK, RANGED_ATTACK, MOVE, MOVE];
+        }
+
+        const maxCost = 3000;
+        const actualEnergy = Math.min(energy, maxCost);
+
+        const minRangedCost = 300;
+        let remainingEnergy = actualEnergy - minRangedCost;
+
+        const body = [];
+
+        // Add TOUGH parts first
+        while (remainingEnergy >= 60 && body.length < 40) {
+            body.push(TOUGH);
+            remainingEnergy -= 10;
+        }
+
+        // Add minimum 2 RANGED_ATTACK parts
+        body.push(RANGED_ATTACK, RANGED_ATTACK);
+
+        // Add more RANGED_ATTACK parts if we have energy
+        while (remainingEnergy >= 200 && body.filter(function (p) { return p === RANGED_ATTACK; }).length < 20) {
+            body.push(RANGED_ATTACK);
+            remainingEnergy -= 150;
+        }
+
+        // Add MOVE parts
+        const totalParts = body.length;
+        for (let i = 0; i < totalParts && body.length < 50; i++) {
+            body.push(MOVE);
+        }
+
+     * @param { RoomPosition | { pos: RoomPosition } } target
+            */
+        smartMove: function (creep, target) {
+            // Basic stuck detection
+            if (creep.memory._moveTime === Game.time - 1) {
+                if (creep.pos.x === creep.memory._lastX && creep.pos.y === creep.memory._lastY) {
+                    creep.memory._stuckCount = (creep.memory._stuckCount || 0) + 1;
+                } else {
+                    creep.memory._stuckCount = 0;
+                }
+            } else {
+                creep.memory._stuckCount = 0;
+            }
+
+            creep.memory._moveTime = Game.time;
+            creep.memory._lastX = creep.pos.x;
+            creep.memory._lastY = creep.pos.y;
+
+            const opts = { visualizePathStyle: { stroke: '#ffffff' } };
+
+            // If stuck for 3 ticks, swap or repath
+            if (creep.memory._stuckCount >= 3) {
+                opts.reusePath = 0;
+                opts.ignoreCreeps = false; // Force pathfinder to see creeps
+                creep.say('⚠️ stuck');
+            } else {
+                opts.reusePath = 10;
+                opts.ignoreCreeps = true; // Default to ignoring creeps for CPU
+            }
+
+            creep.moveTo(target, opts);
+        }
+    };

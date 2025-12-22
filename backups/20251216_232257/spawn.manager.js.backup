@@ -1,0 +1,214 @@
+const constants = require('constants');
+const utils = require('utils');
+
+module.exports = {
+    run: function () {
+        // Support multiple spawns
+        for (const spawnName in Game.spawns) {
+            const spawn = Game.spawns[spawnName];
+            this.manageSpawn(spawn);
+        }
+    },
+
+    manageSpawn: function (spawn) {
+        if (spawn.spawning) {
+            const spawningCreep = Game.creeps[spawn.spawning.name];
+            spawn.room.visual.text(
+                '🛠️ ' + spawningCreep.memory.role,
+                spawn.pos.x + 1,
+                spawn.pos.y,
+                { align: 'left', opacity: 0.8 }
+            );
+            return;
+        }
+
+        // Optimized creep counting - single pass
+        const creepCounts = {
+            [constants.ROLE_HARVESTER]: 0,
+            [constants.ROLE_HAULER]: 0,
+            [constants.ROLE_UPGRADER]: 0,
+            [constants.ROLE_BUILDER]: 0,
+            [constants.ROLE_WARRIOR]: 0,
+            [constants.ROLE_RANGED]: 0,
+            [constants.ROLE_HEALER]: 0
+        };
+
+        for (const name in Game.creeps) {
+            const creep = Game.creeps[name];
+            if (creepCounts[creep.memory.role] !== undefined) {
+                creepCounts[creep.memory.role]++;
+            }
+        }
+
+        const energyAvailable = spawn.room.energyAvailable;
+        const energyCapacity = spawn.room.energyCapacityAvailable;
+        const room = spawn.room;
+
+        // Debug logging (only when enabled)
+        if (Memory.debug) {
+            console.log(`[Spawn] Energy: ${energyAvailable}/${energyCapacity} | Creeps: H:${creepCounts[constants.ROLE_HARVESTER]} Hu:${creepCounts[constants.ROLE_HAULER]} B:${creepCounts[constants.ROLE_BUILDER]} U:${creepCounts[constants.ROLE_UPGRADER]}`);
+        }
+
+        // Smart Spawning Logic
+        // ALWAYS check harvesters first - they are critical for economy
+        // Spawn harvesters if below max, either in recovery mode (any energy >= 200) or normal mode (full energy)
+        if (creepCounts[constants.ROLE_HARVESTER] < constants.MAX_HARVESTERS) {
+            const isRecovery = creepCounts[constants.ROLE_HARVESTER] < constants.SPAWN_RECOVERY_HARVESTER_COUNT;
+
+            if (isRecovery && energyAvailable >= 200) {
+                // Recovery: spawn with whatever energy available
+                if (Memory.debug) console.log(`[Spawn] RECOVERY MODE: Spawning harvester with ${energyAvailable} energy`);
+                this.spawnCreep(spawn, constants.ROLE_HARVESTER, energyAvailable);
+                return;
+            } else if (!isRecovery && energyAvailable >= energyCapacity) {
+                // Normal: spawn with full energy
+                if (Memory.debug) console.log(`[Spawn] Spawning harvester with full energy: ${energyCapacity}`);
+                this.spawnCreep(spawn, constants.ROLE_HARVESTER, energyCapacity);
+                return;
+            }
+        }
+
+        // Check if there are hostiles (cached - only check every 5 ticks for CPU savings)
+        if (!spawn.room.memory.lastHostileCheck || Game.time - spawn.room.memory.lastHostileCheck > 5) {
+            spawn.room.memory.hasHostiles = room.find(FIND_HOSTILE_CREEPS).length > 0;
+            spawn.room.memory.lastHostileCheck = Game.time;
+        }
+        const hasHostiles = spawn.room.memory.hasHostiles;
+
+        // Check if there are flags (manual trigger for military)
+        const hasFlags = room.find(FIND_FLAGS).length > 0;
+
+        // Spawn military if either hostiles detected OR flags placed manually
+        const needMilitary = hasHostiles || hasFlags;
+
+        // PRIORITY 1: Military units when needed (higher priority than workers)
+        if (needMilitary) {
+            if (energyAvailable >= 200) { // Minimum for basic military unit
+                if (creepCounts[constants.ROLE_WARRIOR] < 2) {
+                    if (Memory.debug) console.log(`[Spawn] Spawning warrior (hostiles/flags detected)`);
+                    this.spawnCreep(spawn, constants.ROLE_WARRIOR, energyAvailable);
+                    return;
+                }
+                if (creepCounts[constants.ROLE_RANGED] < 2) {
+                    if (Memory.debug) console.log(`[Spawn] Spawning ranged (hostiles/flags detected)`);
+                    this.spawnCreep(spawn, constants.ROLE_RANGED, energyAvailable);
+                    return;
+                }
+                if (creepCounts[constants.ROLE_HEALER] < 1) {
+                    if (Memory.debug) console.log(`[Spawn] Spawning healer (hostiles/flags detected)`);
+                    this.spawnCreep(spawn, constants.ROLE_HEALER, energyAvailable);
+                    return;
+                }
+            }
+        }
+
+        // PRIORITY 2: Worker creeps with flexible energy requirements
+        // Spawn Haulers if we have Harvesters (to move the energy)
+        if (creepCounts[constants.ROLE_HARVESTER] > 0 && creepCounts[constants.ROLE_HAULER] < constants.MAX_HAULERS) {
+            // Haulers need at least 200 energy (2 CARRY + 2 MOVE)
+            if (energyAvailable >= 200) {
+                if (Memory.debug) console.log(`[Spawn] Spawning hauler with ${energyAvailable} energy`);
+                this.spawnCreep(spawn, constants.ROLE_HAULER, energyAvailable);
+                return;
+            }
+        }
+
+        // Builders and Upgraders: use tier system but don't require full energy
+        if (creepCounts[constants.ROLE_BUILDER] < constants.MAX_BUILDERS) {
+            const tier = this.getWorkerTier(spawn);
+            const spawnEnergy = this.getWorkerSpawnEnergy(tier, energyCapacity);
+
+            // Spawn if we have enough energy for the tier, or at least 200 for basic worker
+            if (energyAvailable >= Math.min(spawnEnergy, 200)) {
+                const actualEnergy = Math.min(energyAvailable, spawnEnergy);
+                if (Memory.debug) console.log(`[Spawn] Spawning builder (tier ${tier}) with ${actualEnergy} energy`);
+                this.spawnCreep(spawn, constants.ROLE_BUILDER, actualEnergy);
+                return;
+            }
+        } else if (creepCounts[constants.ROLE_UPGRADER] < constants.MAX_UPGRADERS) {
+            const tier = this.getWorkerTier(spawn);
+            const spawnEnergy = this.getWorkerSpawnEnergy(tier, energyCapacity);
+
+            // Spawn if we have enough energy for the tier, or at least 200 for basic worker
+            if (energyAvailable >= Math.min(spawnEnergy, 200)) {
+                const actualEnergy = Math.min(energyAvailable, spawnEnergy);
+                if (Memory.debug) console.log(`[Spawn] Spawning upgrader (tier ${tier}) with ${actualEnergy} energy`);
+                this.spawnCreep(spawn, constants.ROLE_UPGRADER, actualEnergy);
+                return;
+            }
+        }
+
+        // If we get here, either all creeps are at max or we don't have enough energy
+        if (Memory.debug && Game.time % 10 === 0) {
+            console.log(`[Spawn] No spawning needed. All roles at capacity or insufficient energy.`);
+        }
+    },
+
+    getWorkerTier: function (spawn) {
+        const container = Game.getObjectById(constants.WORKER_ENERGY_CONTAINER_ID);
+        if (!container) {
+            if (Memory.debug) console.log(`[Spawn] Worker energy container not found (ID: ${constants.WORKER_ENERGY_CONTAINER_ID}), defaulting to tier 1`);
+            return 1; // Default to tier 1 (low energy) if container not found
+        }
+
+        const energyRatio = container.store[RESOURCE_ENERGY] / container.store.getCapacity(RESOURCE_ENERGY);
+
+        if (Memory.debug) {
+            console.log(`[Spawn] Worker tier check: ${container.store[RESOURCE_ENERGY]}/${container.store.getCapacity(RESOURCE_ENERGY)} = ${(energyRatio * 100).toFixed(1)}%`);
+        }
+
+        if (energyRatio < constants.WORKER_TIER_1_THRESHOLD) return 1;
+        if (energyRatio < constants.WORKER_TIER_2_THRESHOLD) return 2;
+        return 3;
+    },
+
+    getWorkerSpawnEnergy: function (tier, maxEnergy) {
+        if (tier === 1) return Math.min(constants.WORKER_TIER_1_ENERGY, maxEnergy);
+        if (tier === 2) return Math.min(constants.WORKER_TIER_2_ENERGY, maxEnergy);
+        return maxEnergy; // Tier 3 uses full energy
+    },
+
+    spawnCreep: function (spawn, role, energy) {
+        let body = [];
+
+        // Use role-specific body composition if available
+        try {
+            const roleModule = require('role.' + role);
+            if (roleModule.spawn) {
+                body = roleModule.spawn(energy);
+            }
+        } catch (e) {
+            // No spawn method for role
+            if (Memory.debug) console.log(`[Spawn] No spawn method for role: ${role}`);
+        }
+
+        // Default body composition using utils
+        if (body.length === 0) {
+            if (role === constants.ROLE_HARVESTER) {
+                body = utils.makeHarvesterBody(energy);
+            } else {
+                body = utils.makeWorkerBody(energy);
+            }
+        }
+
+        // Calculate actual body cost
+        const bodyCost = body.reduce((sum, part) => sum + BODYPART_COST[part], 0);
+
+        const newName = role + Game.time;
+        const result = spawn.spawnCreep(body, newName, { memory: { role: role } });
+
+        // Enhanced logging
+        if (result === OK) {
+            console.log(`✅ [Spawn] ${role} "${newName}" | Body: ${body.length} parts | Cost: ${bodyCost}/${energy} energy`);
+        } else {
+            console.log(`❌ [Spawn] Failed to spawn ${role} | Error: ${result} | Body cost: ${bodyCost} | Available: ${spawn.room.energyAvailable}`);
+        }
+
+        // Detailed debug logging
+        if (Memory.debug) {
+            console.log(`[Spawn] Body composition: ${JSON.stringify(body)}`);
+        }
+
+        return result;
+    }
+};

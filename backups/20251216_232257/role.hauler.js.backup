@@ -1,0 +1,116 @@
+const constants = require('constants');
+const utils = require('utils');
+
+module.exports = {
+    spawn: function (energy) {
+        return utils.makeHaulerBody(energy);
+    },
+
+    run: function (creep) {
+        // State management
+        if (creep.memory.hauling && creep.store[RESOURCE_ENERGY] === 0) {
+            creep.memory.hauling = false;
+            creep.say('🔄 collect');
+        }
+        if (!creep.memory.hauling && creep.store.getFreeCapacity() === 0) {
+            creep.memory.hauling = true;
+            creep.say('🚚 deliver');
+        }
+
+        if (creep.memory.hauling) {
+            // Delivery priority: spawns/extensions -> towers -> storage -> workers
+            let target = null;
+
+            // 1. Spawns/Extensions (highest priority)
+            target = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+                filter: function (s) {
+                    return (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) &&
+                        s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+                }
+            });
+
+            // 2. Towers (if below 80%)
+            if (!target) {
+                target = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+                    filter: function (s) {
+                        return s.structureType === STRUCTURE_TOWER &&
+                            s.store.getFreeCapacity(RESOURCE_ENERGY) > 0 &&
+                            s.store[RESOURCE_ENERGY] < s.store.getCapacity(RESOURCE_ENERGY) * 0.8;
+                    }
+                });
+            }
+
+            // 3. Storage
+            if (!target && creep.room.storage && creep.room.storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+                target = creep.room.storage;
+            }
+
+            // 4. Workers (only if we have energy and nothing else needs it)
+            if (!target && creep.store[RESOURCE_ENERGY] > 0) {
+                target = creep.pos.findClosestByPath(FIND_MY_CREEPS, {
+                    filter: function (c) {
+                        if (c.memory.role === 'builder') {
+                            return c.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+                        } else if (c.memory.role === 'upgrader') {
+                            return c.store[RESOURCE_ENERGY] === 0;
+                        }
+                        return false;
+                    }
+                });
+            }
+
+            if (target) {
+                if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+                    utils.smartMove(creep, target);
+                }
+            } else {
+                // Nothing needs energy - idle near storage
+                if (creep.room.storage && !creep.pos.inRangeTo(creep.room.storage, 3)) {
+                    utils.smartMove(creep, creep.room.storage);
+                }
+            }
+        } else {
+            // Collect energy
+            // 1. Dropped energy (decaying)
+            const droppedEnergy = creep.pos.findClosestByRange(FIND_DROPPED_RESOURCES, {
+                filter: function (r) {
+                    return r.resourceType === RESOURCE_ENERGY && r.amount > 50;
+                }
+            });
+
+            if (droppedEnergy) {
+                if (creep.pickup(droppedEnergy) === ERR_NOT_IN_RANGE) {
+                    utils.smartMove(creep, droppedEnergy);
+                }
+                return;
+            }
+
+            // 2. Containers with energy
+            const container = creep.pos.findClosestByRange(FIND_STRUCTURES, {
+                filter: function (s) {
+                    return s.structureType === STRUCTURE_CONTAINER && s.store[RESOURCE_ENERGY] > 100;
+                }
+            });
+
+            if (container) {
+                if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+                    utils.smartMove(creep, container);
+                }
+                return;
+            }
+
+            // 3. Tombstones
+            const tombstone = creep.pos.findClosestByRange(FIND_TOMBSTONES, {
+                filter: function (t) {
+                    return t.store[RESOURCE_ENERGY] > 0;
+                }
+            });
+
+            if (tombstone) {
+                if (creep.withdraw(tombstone, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+                    utils.smartMove(creep, tombstone);
+                }
+            }
+        }
+    }
+};

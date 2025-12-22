@@ -1,0 +1,200 @@
+const constants = require('constants');
+const utils = require('utils');
+const storageBalancing = require('storage.balancing');
+
+module.exports = {
+    spawn: function (energy) {
+        return utils.makeHarvesterBody(energy);
+    },
+
+    run: function (creep) {
+        // Rebalance harvesters across sources if needed
+        this.rebalanceHarvesters(creep);
+
+        // State management: delivering or harvesting
+        if (creep.memory.delivering && creep.store[RESOURCE_ENERGY] === 0) {
+            creep.memory.delivering = false;
+            creep.say('⛏️ mine');
+        }
+        if (!creep.memory.delivering && creep.store.getFreeCapacity() === 0) {
+            creep.memory.delivering = true;
+            creep.say('📦 store');
+        }
+
+        // Assign source if not assigned
+        if (!creep.memory.sourceId) {
+            this.assignSource(creep);
+        }
+
+        const source = Game.getObjectById(creep.memory.sourceId);
+        if (!source) return;
+
+        // If source is regenerating (empty), balance energy between nearby storages
+        if (source.energy === 0) {
+            storageBalancing.balanceStorages(creep);
+            return;
+        }
+
+        // Check for container near source (Static Mining)
+        if (creep.memory.containerId === undefined) {
+            const container = source.pos.findClosestByRange(FIND_STRUCTURES, {
+                filter: function (s) {
+                    return s.structureType === STRUCTURE_CONTAINER && s.pos.getRangeTo(source) <= 1;
+                }
+            });
+            creep.memory.containerId = container ? container.id : null;
+        }
+
+        const container = creep.memory.containerId ? Game.getObjectById(creep.memory.containerId) : null;
+
+        if (container) {
+            // Static Mining Mode: Sit on container and harvest
+            if (creep.pos.isEqualTo(container.pos)) {
+                creep.harvest(source);
+                if (container.hits < container.hitsMax && creep.store[RESOURCE_ENERGY] > 0) {
+                    creep.repair(container);
+                }
+            } else {
+                const creepsOnContainer = container.pos.lookFor(LOOK_CREEPS);
+                const isOccupied = creepsOnContainer.length > 0 && creepsOnContainer[0].name !== creep.name;
+
+                if (!isOccupied) {
+                    utils.smartMove(creep, container);
+                } else {
+                    if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
+                        utils.smartMove(creep, source);
+                    }
+                }
+            }
+        } else {
+            // Legacy Mode: Harvest and Carry
+            if (creep.memory.delivering) {
+                // Simple delivery: spawns/extensions -> storage -> containers -> haulers
+                let target = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+                    filter: function (s) {
+                        return (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) &&
+                            s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+                    }
+                });
+
+                // Only deliver to storage if it has less than 2000 energy (let haulers handle big storage)
+                if (!target && creep.room.storage &&
+                    creep.room.storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0 &&
+                    creep.room.storage.store[RESOURCE_ENERGY] < 2000) {
+                    target = creep.room.storage;
+                }
+
+                if (!target) {
+                    target = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+                        filter: function (s) {
+                            return s.structureType === STRUCTURE_CONTAINER && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+                        }
+                    });
+                }
+
+                if (target) {
+                    if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+                        utils.smartMove(creep, target);
+                    }
+                } else {
+                    // No storage/container available - try to give energy to haulers
+                    const hauler = creep.pos.findClosestByRange(FIND_MY_CREEPS, {
+                        filter: function (c) {
+                            return c.memory.role === 'hauler' &&
+                                c.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+                        }
+                    });
+
+                    if (hauler) {
+                        if (creep.transfer(hauler, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+                            utils.smartMove(creep, hauler);
+                        }
+                        creep.say('🚚 hauler');
+                    } else {
+                        // No delivery target available at all - switch back to harvesting
+                        creep.memory.delivering = false;
+                        creep.say('⛏️ mine');
+                    }
+                }
+            } else {
+                if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
+                    utils.smartMove(creep, source);
+                }
+            }
+        }
+    },
+
+    countHarvestersPerSource: function () {
+        const sourceCounts = {};
+        for (const name in Game.creeps) {
+            const creep = Game.creeps[name];
+            if (creep.memory.role === constants.ROLE_HARVESTER && creep.memory.sourceId) {
+                sourceCounts[creep.memory.sourceId] = (sourceCounts[creep.memory.sourceId] || 0) + 1;
+            }
+        }
+        return sourceCounts;
+    },
+
+    assignSource: function (creep) {
+        const sources = creep.room.find(FIND_SOURCES);
+        const sourceCounts = this.countHarvestersPerSource();
+
+        // Try to assign to a source that has capacity
+        for (const source of sources) {
+            const maxCapacity = constants.SOURCE_CAPACITY[source.id] || 1;
+            const currentCount = sourceCounts[source.id] || 0;
+            if (currentCount < maxCapacity) {
+                creep.memory.sourceId = source.id;
+                creep.say('→ ' + source.id.substr(-3));
+                console.log(`Assigned ${creep.name} to source ${source.id} (${currentCount + 1}/${maxCapacity})`);
+                return;
+            }
+        }
+
+        // Fallback: assign to first source if no capacity available
+        if (!creep.memory.sourceId && sources.length > 0) {
+            creep.memory.sourceId = sources[0].id;
+            console.log(`Fallback: Assigned ${creep.name} to source ${sources[0].id}`);
+        }
+    },
+
+    rebalanceHarvesters: function (creep) {
+        if (Game.time % 10 !== 0) return;
+        if (!creep.memory.sourceId) return;
+
+        const sourceCounts = this.countHarvestersPerSource();
+        const mySourceId = creep.memory.sourceId;
+        const maxCapacity = constants.SOURCE_CAPACITY[mySourceId] || 1;
+        const currentCount = sourceCounts[mySourceId] || 0;
+
+        // If too many harvesters at this source, reassign the newest ones
+        if (currentCount > maxCapacity) {
+            const harvestersAtMySource = [];
+            for (const name in Game.creeps) {
+                const c = Game.creeps[name];
+                if (c.memory.role === constants.ROLE_HARVESTER && c.memory.sourceId === mySourceId) {
+                    harvestersAtMySource.push(c);
+                }
+            }
+
+            // Sort by spawn time (older creeps stay)
+            harvestersAtMySource.sort(function (a, b) {
+                const aTime = parseInt(a.name.replace(/[^\d]/g, ''));
+                const bTime = parseInt(b.name.replace(/[^\d]/g, ''));
+                return aTime - bTime;
+            });
+
+            // Find my position in the list
+            const myIndex = harvestersAtMySource.findIndex(function (c) {
+                return c.name === creep.name;
+            });
+
+            // If I'm beyond the capacity, reassign me
+            if (myIndex >= maxCapacity) {
+                delete creep.memory.sourceId;
+                this.assignSource(creep);
+                creep.say('↻ rebal');
+            }
+        }
+    }
+};

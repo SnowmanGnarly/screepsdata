@@ -1,0 +1,61 @@
+const roleHarvester = require('role.harvester');
+const roleUpgrader = require('role.upgrader');
+const roleBuilder = require('role.builder');
+const spawnManager = require('spawn.manager');
+const towerManager = require('tower.manager');
+const constants = require('constants');
+// const guiRenderer = require('gui.renderer');
+// const guiStats = require('gui.stats');
+
+// Valid roles in the codebase
+const VALID_ROLES = [
+    'harvester', 'upgrader', 'builder', 'hauler',
+    'warrior', 'ranged', 'healer'
+];
+
+module.exports.loop = function () {
+    // Clear dead creeps from memory more efficiently
+    for (let name in Memory.creeps) {
+        if (!Game.creeps[name]) {
+            delete Memory.creeps[name];
+            console.log('Clearing non-existing creep memory:', name);
+        }
+    }
+
+    // Run tower manager
+    towerManager.run();
+
+    // Run spawn manager
+    spawnManager.run();
+
+    // Run GUI stats collection and renderer for each room
+    // for (let roomName in Game.rooms) {
+    //     const room = Game.rooms[roomName];
+    //     guiStats.collect(room);
+    //     guiRenderer.run(room);
+    // }
+
+    // Run creep roles more efficiently
+    for (let name in Game.creeps) {
+        const creep = Game.creeps[name];
+
+        // Check if creep has a valid role
+        if (!creep.memory.role || !VALID_ROLES.includes(creep.memory.role)) {
+            console.log('Creep', name, 'has invalid role:', creep.memory.role, '- suiciding');
+            creep.suicide();
+            continue;
+        }
+
+        try {
+            const roleModule = require('role.' + creep.memory.role);
+
+            if (roleModule && roleModule.run) {
+                roleModule.run(creep);
+            } else {
+                console.log('No role module found for:', creep.memory.role);
+            }
+        } catch (error) {
+            console.log('Error running role', creep.memory.role, 'for creep', name, ':', error.message);
+        }
+    }
+};
